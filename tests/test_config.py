@@ -1,7 +1,9 @@
 import logging
+import os
 import unittest
+from unittest import mock
 
-from config import ConfigError, _parse_machine_name, parse_log_level
+from config import ConfigError, _parse_base_url, _parse_machine_name, load_config, parse_log_level
 
 
 class ParseMachineNameTest(unittest.TestCase):
@@ -28,6 +30,27 @@ class ParseLogLevelTest(unittest.TestCase):
         for value in ["verbose", "", "10", "WARN", "NOTSET"]:
             with self.subTest(value=value), self.assertRaises(ConfigError):
                 parse_log_level(value)
+
+
+class ParseBaseUrlTest(unittest.TestCase):
+    def test_rejects_query_and_fragment(self):
+        for value in ["https://example.com?tenant=x", "https://example.com/#section"]:
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                _parse_base_url(value)
+
+
+class LoadConfigTest(unittest.TestCase):
+    def test_preserves_password_whitespace(self):
+        env = {
+            "DRUPAL_BASE_URL": "https://example.com",
+            "DRUPAL_USER": "user",
+            "DRUPAL_PASSWORD": " secret ",
+            "DRUPAL_NODE_TYPE": "page",
+            "DRUPAL_NODE_ID": "1",
+            "DRUPAL_FILE_FIELD": "field_pdf",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(load_config().password, " secret ")
 
 
 if __name__ == "__main__":

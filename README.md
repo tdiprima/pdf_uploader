@@ -63,11 +63,15 @@ python main.py             # upload every valid PDF in LOCAL_PDF_DIR
 python main.py --dry-run   # list the files that would be uploaded; no network calls
 ```
 
+Dry-run mode prints one selected filename per line to stdout. It does not contact Drupal.
+
 Only files directly inside `LOCAL_PDF_DIR` (no subfolders) that end in `.pdf`, don't start with a dot, and start with the `%PDF-` magic bytes are considered. Anything that looks like a PDF by name but fails the header check stops the run with a clear error instead of uploading a broken file. Each file is checked again when it is opened for upload, so a file that changes after the scan is also caught.
 
 Filenames must use only ASCII letters, digits, spaces, `.`, `_` and `-`, start with a letter or digit, and be at most 240 characters. The name travels in an HTTP header, which cannot carry arbitrary Unicode or quotes, so a name like `报告.pdf` or `it's.pdf` stops the run with an error. Rename such files before uploading.
 
 **Reruns after a failure are safe.** Each upload is committed to Drupal on its own, so a run that fails partway leaves the earlier files attached. Before uploading, the tool lists the files already on the node and skips any local PDF that matches one by name (including Drupal's collision rename, `x.pdf` → `x_0.pdf`, compared case-insensitively) and by exact byte size. This also covers the ambiguous case: if a request times out or the server returns a 5xx error, Drupal may or may not have stored the file. Rerun the same command; if Drupal did store it, the file is skipped and its URL is printed. Skipped files still print a `name -> URL` line and are logged with `"event": "upload_skipped"`.
+
+The comparison spans every JSON:API result page. Each remote attachment can match at most one local file, and exact local filenames are reserved before collision-renamed matches are considered. For example, when both `x.pdf` and `x_0.pdf` exist locally, a remote `x_0.pdf` is assigned to the exact local name rather than being used to skip both files.
 
 Limitations of the name-and-size match: a changed PDF that happens to keep the same name and exact size is treated as already uploaded, and two runs started at the same time against the same node can both upload the same file.
 
@@ -88,4 +92,3 @@ python -m unittest discover -s tests -t .
 ```
 
 <br>
-

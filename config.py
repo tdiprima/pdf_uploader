@@ -33,17 +33,19 @@ class UploaderConfig:
     timeout_seconds: int
 
 
-def _require_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
+def _require_env(name: str, *, preserve_whitespace: bool = False) -> str:
+    raw_value = os.environ.get(name, "")
+    if not raw_value.strip():
         raise ConfigError(f"Missing required environment variable: {name}")
-    return value
+    return raw_value if preserve_whitespace else raw_value.strip()
 
 
 def _parse_base_url(raw_url: str) -> str:
     parsed = urlparse(raw_url)
     if parsed.scheme != "https" or not parsed.netloc:
         raise ConfigError(f"DRUPAL_BASE_URL must be an https:// URL, got: {raw_url!r}")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise ConfigError(f"DRUPAL_BASE_URL must not contain parameters, a query, or a fragment: {raw_url!r}")
     return raw_url.rstrip("/")
 
 
@@ -83,7 +85,7 @@ def load_config() -> UploaderConfig:
     config = UploaderConfig(
         base_url=_parse_base_url(_require_env("DRUPAL_BASE_URL")),
         username=_require_env("DRUPAL_USER"),
-        password=_require_env("DRUPAL_PASSWORD"),
+        password=_require_env("DRUPAL_PASSWORD", preserve_whitespace=True),
         node_type=_parse_machine_name("DRUPAL_NODE_TYPE", _require_env("DRUPAL_NODE_TYPE")),
         node_id=_parse_positive_int("DRUPAL_NODE_ID", _require_env("DRUPAL_NODE_ID")),
         field_name=_parse_machine_name("DRUPAL_FILE_FIELD", _require_env("DRUPAL_FILE_FIELD")),

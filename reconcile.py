@@ -8,7 +8,7 @@ plus byte size lets a rerun skip what is already there.
 
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Collection, Iterable
 
 
 @dataclass(frozen=True)
@@ -28,9 +28,24 @@ def is_same_or_renamed(local_name: str, remote_name: str) -> bool:
     return re.fullmatch(pattern, remote_name, flags=re.IGNORECASE | re.ASCII) is not None
 
 
-def find_existing_upload(local_name: str, local_size: int, remote_files: Iterable[RemoteFile]) -> RemoteFile | None:
-    """Return the attached file that matches this local PDF by name and size, if any."""
-    for remote_file in remote_files:
-        if remote_file.size == local_size and is_same_or_renamed(local_name, remote_file.filename):
+def find_existing_upload(
+    local_name: str,
+    local_size: int,
+    remote_files: Iterable[RemoteFile],
+    reserved_names: Collection[str] = (),
+) -> RemoteFile | None:
+    """Return one matching remote file, preferring exact names and preserving other local names."""
+    candidates = [remote_file for remote_file in remote_files if remote_file.size == local_size]
+    local_key = local_name.casefold()
+    for remote_file in candidates:
+        if remote_file.filename.casefold() == local_key:
+            return remote_file
+
+    protected_keys = {name.casefold() for name in reserved_names} - {local_key}
+    for remote_file in candidates:
+        if (
+            remote_file.filename.casefold() not in protected_keys
+            and is_same_or_renamed(local_name, remote_file.filename)
+        ):
             return remote_file
     return None

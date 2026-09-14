@@ -119,6 +119,42 @@ class FetchAttachedFilesTest(unittest.TestCase):
             with self.subTest(resource=resource), self.assertRaises(DrupalApiError):
                 self.fetch_with(json_bytes({"data": [resource]}))
 
+    def test_follows_all_pagination_links(self):
+        session = mock.Mock(spec=requests.Session)
+        first_url = "https://example.com/jsonapi/node/page/" + NODE_UUID + "/field_pdf"
+        next_url = first_url + "?page[offset]=50"
+        session.get.side_effect = [
+            make_response(200, json_bytes({
+                "data": [file_resource("a.pdf")],
+                "links": {"next": {"href": next_url}},
+            })),
+            make_response(200, json_bytes({"data": [file_resource("b.pdf")]})),
+        ]
+
+        files = fetch_attached_files(session, make_config(), NODE_UUID)
+
+        self.assertEqual([file.filename for file in files], ["a.pdf", "b.pdf"])
+        self.assertEqual(session.get.call_args_list[1].args[0], next_url)
+
+    def test_rejects_cyclic_pagination_links(self):
+        session = mock.Mock(spec=requests.Session)
+        first_url = "https://example.com/jsonapi/node/page/" + NODE_UUID + "/field_pdf"
+        session.get.return_value = make_response(
+            200,
+            json_bytes({"data": [], "links": {"next": {"href": first_url}}}),
+        )
+        with self.assertRaisesRegex(DrupalApiError, "pagination cycle"):
+            fetch_attached_files(session, make_config(), NODE_UUID)
+
+    def test_rejects_pagination_link_outside_field_endpoint(self):
+        session = mock.Mock(spec=requests.Session)
+        session.get.return_value = make_response(
+            200,
+            json_bytes({"data": [], "links": {"next": "https://other.example/files?page=2"}}),
+        )
+        with self.assertRaisesRegex(DrupalApiError, "outside the file-field endpoint"):
+            fetch_attached_files(session, make_config(), NODE_UUID)
+
 
 class UploadPdfTest(unittest.TestCase):
     def upload_with(self, session: mock.Mock, base_url: str = "https://example.com"):

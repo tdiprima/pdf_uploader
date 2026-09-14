@@ -87,18 +87,23 @@ def parse_args() -> argparse.Namespace:
 
 
 def upload_one(
-    session: requests.Session, config: UploaderConfig, node_uuid: str, pdf_path: Path, attached: list[RemoteFile]
+    session: requests.Session,
+    config: UploaderConfig,
+    node_uuid: str,
+    pdf_path: Path,
+    attached: list[RemoteFile],
+    reserved_names: set[str] | None = None,
 ) -> bool:
     """Upload one PDF unless it is already attached. Returns True if it was uploaded."""
     with open_validated_pdf(pdf_path) as pdf:
-        existing = find_existing_upload(pdf.name, pdf.size, attached)
+        existing = find_existing_upload(pdf.name, pdf.size, attached, reserved_names or set())
         if existing is not None:
+            attached.remove(existing)
             logger.info("already attached, skipping", extra={"event": "upload_skipped", "file": pdf.name,
                                                              "remote_name": existing.filename, "url": existing.url})
             print(f"{pdf.name} -> {existing.url}")
             return False
         uploaded = upload_pdf(session, config, node_uuid, pdf.name, pdf.file_handle)
-    attached.append(uploaded)
     print(f"{pdf.name} -> {uploaded.url}")
     return True
 
@@ -108,7 +113,10 @@ def upload_all(config: UploaderConfig, pdf_files: list[Path]) -> int:
     with build_session(config) as session:
         node_uuid = fetch_node_uuid(session, config)
         attached = fetch_attached_files(session, config, node_uuid)
-        return sum(upload_one(session, config, node_uuid, pdf_path, attached) for pdf_path in pdf_files)
+        reserved_names = {path.name for path in pdf_files}
+        return sum(
+            upload_one(session, config, node_uuid, pdf_path, attached, reserved_names) for pdf_path in pdf_files
+        )
 
 
 def run(args: argparse.Namespace) -> int:
@@ -125,6 +133,8 @@ def run(args: argparse.Namespace) -> int:
     logger.info("files selected", extra={"event": "files_selected", "count": len(pdf_files),
                                           "files": [path.name for path in pdf_files]})
     if args.dry_run:
+        for path in pdf_files:
+            print(path.name)
         return EXIT_OK
 
     uploaded_count = upload_all(config, pdf_files)

@@ -14,7 +14,7 @@ filename and URL come back in the response and are logged.
 import logging
 import uuid
 from typing import Any, BinaryIO
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -145,15 +145,55 @@ def fetch_node_uuid(session: requests.Session, config: UploaderConfig) -> str:
 def fetch_attached_files(session: requests.Session, config: UploaderConfig, node_uuid: str) -> list[RemoteFile]:
     """List files already in the node's field. Refuses single-value fields, where uploads replace the file."""
     action = f"Listing files in {config.field_name}"
-    body = _get_json_object(session, config, _field_url(config, node_uuid), action)
-    data = body.get("data")
-    # JSON:API returns an object (or null) for single-value fields and a list for multi-value ones.
-    if not isinstance(data, list):
-        raise DrupalApiError(
-            f"Field {config.field_name} holds only one file, so each upload would replace the last. "
-            "Set its 'Allowed number of values' to Unlimited."
-        )
-    return [_parse_remote_file(resource, config, action) for resource in data]
+    field_url = _field_url(config, node_uuid)
+    expected_endpoint = urlparse(field_url)
+    url: str | None = field_url
+    seen_urls: set[str] = set()
+    files: list[RemoteFile] = []
+
+    while url is not None:
+        if url in seen_urls:
+            raise DrupalApiError(f"{action}: pagination cycle detected at {url}")
+        seen_urls.add(url)
+        body = _get_json_object(session, config, url, action)
+        data = body.get("data")
+        # JSON:API returns an object (or null) for single-value fields and a list for multi-value ones.
+        if not isinstance(data, list):
+            raise DrupalApiError(
+                f"Field {config.field_name} holds only one file, so each upload would replace the last. "
+                "Set its 'Allowed number of values' to Unlimited."
+            )
+        files.extend(_parse_remote_file(resource, config, action) for resource in data)
+
+        links = body.get("links")
+        if links is None:
+            url = None
+            continue
+        if not isinstance(links, dict):
+            raise DrupalApiError(f"{action}: response has wrongly typed 'links'")
+        next_link = links.get("next")
+        if next_link is None:
+            url = None
+        elif isinstance(next_link, str):
+            url = urljoin(url, next_link)
+        elif isinstance(next_link, dict) and isinstance(next_link.get("href"), str):
+            url = urljoin(url, next_link["href"])
+        else:
+            raise DrupalApiError(f"{action}: response has wrongly typed 'links.next'")
+        if url is not None:
+            next_endpoint = urlparse(url)
+            if (
+                next_endpoint.scheme,
+                next_endpoint.netloc,
+                next_endpoint.path,
+            ) != (
+                expected_endpoint.scheme,
+                expected_endpoint.netloc,
+                expected_endpoint.path,
+            ):
+                raise DrupalApiError(f"{action}: pagination link points outside the file-field endpoint")
+
+    return files
 
 
 def upload_pdf(

@@ -48,6 +48,14 @@ class MainExitCodeTest(unittest.TestCase):
         (self.root / "fake.pdf").write_bytes(b"nope")
         self.assertEqual(self.run_main(self.env), main.EXIT_INVALID_INPUT)
 
+    def test_dry_run_prints_each_selected_filename(self):
+        (self.root / "a.pdf").write_bytes(VALID_PDF_BYTES)
+        (self.root / "b.pdf").write_bytes(VALID_PDF_BYTES)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(self.run_main({**self.env, "LOG_LEVEL": "ERROR"}), main.EXIT_OK)
+        self.assertEqual(output.getvalue(), "a.pdf\nb.pdf\n")
+
 
 class UploadOneTest(unittest.TestCase):
     def setUp(self):
@@ -67,13 +75,37 @@ class UploadOneTest(unittest.TestCase):
         upload_pdf.assert_not_called()
         self.assertEqual(output.getvalue(), "a.pdf -> https://example.com/a_0.pdf\n")
 
-    def test_uploads_and_records_new_file(self):
+    def test_uploads_without_adding_new_file_to_reconciliation_pool(self):
         attached: list[RemoteFile] = []
         uploaded = RemoteFile("a.pdf", len(VALID_PDF_BYTES), "https://example.com/a.pdf")
         with mock.patch.object(main, "upload_pdf", return_value=uploaded), redirect_stdout(io.StringIO()):
             was_uploaded = main.upload_one(mock.Mock(), mock.Mock(), "uuid", self.pdf_path, attached)
         self.assertTrue(was_uploaded)
-        self.assertEqual(attached, [uploaded])
+        self.assertEqual(attached, [])
+
+
+class UploadAllReconciliationTest(unittest.TestCase):
+    def test_remote_file_is_not_reused_for_two_local_files(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        paths = [root / "report.pdf", root / "report_0.pdf"]
+        for path in paths:
+            path.write_bytes(VALID_PDF_BYTES)
+        remote = RemoteFile("report_0.pdf", len(VALID_PDF_BYTES), "https://example.com/report_0.pdf")
+        uploaded = RemoteFile("report_1.pdf", len(VALID_PDF_BYTES), "https://example.com/report_1.pdf")
+
+        session = mock.MagicMock()
+        session.__enter__.return_value = session
+        with mock.patch.object(main, "build_session", return_value=session), \
+                mock.patch.object(main, "fetch_node_uuid", return_value="uuid"), \
+                mock.patch.object(main, "fetch_attached_files", return_value=[remote]), \
+                mock.patch.object(main, "upload_pdf", return_value=uploaded) as upload_pdf, \
+                redirect_stdout(io.StringIO()):
+            uploaded_count = main.upload_all(mock.Mock(), paths)
+
+        self.assertEqual(uploaded_count, 1)
+        self.assertEqual(upload_pdf.call_args.args[3], "report.pdf")
 
 
 if __name__ == "__main__":

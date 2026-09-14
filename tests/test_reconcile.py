@@ -38,6 +38,15 @@ class FindExistingUploadTest(unittest.TestCase):
     def test_size_mismatch_is_not_a_match(self):
         self.assertIsNone(find_existing_upload("a.pdf", 100, [remote("a.pdf", 101), remote("a_0.pdf", 0)]))
 
+    def test_exact_name_has_priority_over_collision_match(self):
+        exact = remote("a.pdf")
+        renamed = remote("a_0.pdf")
+        self.assertIs(find_existing_upload("a.pdf", 100, [renamed, exact]), exact)
+
+    def test_does_not_claim_name_reserved_by_another_local_file(self):
+        renamed = remote("a_0.pdf")
+        self.assertIsNone(find_existing_upload("a.pdf", 100, [renamed], reserved_names={"a_0.pdf"}))
+
 
 if __name__ == "__main__":
     unittest.main()
