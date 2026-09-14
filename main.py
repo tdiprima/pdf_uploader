@@ -8,10 +8,12 @@ Site prerequisites (one-time, via Drupal admin UI, no server access needed):
     2. At /admin/config/services/jsonapi choose "Accept all JSON:API create, read,
        update, and delete operations".
     3. Have a content type with a File field that allows the "pdf" extension, and one
-       node of that type to hold the uploads. Set the field's "File directory" blank
-       so files land in /sites/default/files/ like the existing PDFs.
+       node of that type to hold the uploads. Set the field's "Allowed number of
+       values" to Unlimited, and its "File directory" blank so files land in
+       /sites/default/files/ like the existing PDFs.
 
-Configuration (environment variables):
+Configuration (environment variables, or a .env file in the current directory;
+variables already set in the environment take precedence over .env):
     DRUPAL_BASE_URL         required  https://example.com
     DRUPAL_USER             required  Drupal account that can edit the target node
     DRUPAL_PASSWORD         required
@@ -22,8 +24,10 @@ Configuration (environment variables):
     DRUPAL_TIMEOUT_SECONDS  optional  default 120
     LOG_LEVEL               optional  default INFO
 
-Prints one line per uploaded file to stdout: "<local name> -> <public URL>".
+Prints one line per file to stdout: "<local name> -> <public URL>".
 Drupal renames on collision (x.pdf -> x_0.pdf); the printed URL is authoritative.
+Files already attached to the node (same name or collision rename, same size)
+are skipped, so rerunning after a failure is safe.
 """
 
 import argparse
@@ -31,17 +35,26 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 
-from config import ConfigError, load_config
-from drupal_jsonapi import DrupalApiError, build_session, fetch_node_uuid, upload_pdf
-from pdf_files import InvalidPdfError, find_pdf_files
+import requests
+
+from config import DEFAULT_LOG_LEVEL, ConfigError, UploaderConfig, load_config, parse_log_level
+from drupal_jsonapi import DrupalApiError, build_session, fetch_attached_files, fetch_node_uuid, upload_pdf
+from env_file import load_env_file
+from pdf_files import InvalidPdfError, LocalFileError, find_pdf_files, open_validated_pdf
+from reconcile import RemoteFile, find_existing_upload
 
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
 EXIT_INVALID_INPUT = 3
 EXIT_UPLOAD_ERROR = 4
+EXIT_LOCAL_FILE_ERROR = 5
 
+ENV_FILE_NAME = ".env"
 STANDARD_LOG_ATTRIBUTES = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {"message", "asctime"}
+
+logger = logging.getLogger("pdf_uploader")
 
 
 class JsonFormatter(logging.Formatter):
@@ -61,9 +74,10 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging() -> None:
+    """Send JSON logs to stderr at the default level; LOG_LEVEL is applied once config is read."""
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(JsonFormatter())
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper(), handlers=[handler])
+    logging.basicConfig(level=DEFAULT_LOG_LEVEL, handlers=[handler])
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,28 +86,37 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def upload_all(config, pdf_files) -> None:
+def upload_one(
+    session: requests.Session, config: UploaderConfig, node_uuid: str, pdf_path: Path, attached: list[RemoteFile]
+) -> bool:
+    """Upload one PDF unless it is already attached. Returns True if it was uploaded."""
+    with open_validated_pdf(pdf_path) as pdf:
+        existing = find_existing_upload(pdf.name, pdf.size, attached)
+        if existing is not None:
+            logger.info("already attached, skipping", extra={"event": "upload_skipped", "file": pdf.name,
+                                                             "remote_name": existing.filename, "url": existing.url})
+            print(f"{pdf.name} -> {existing.url}")
+            return False
+        uploaded = upload_pdf(session, config, node_uuid, pdf.name, pdf.file_handle)
+    attached.append(uploaded)
+    print(f"{pdf.name} -> {uploaded.url}")
+    return True
+
+
+def upload_all(config: UploaderConfig, pdf_files: list[Path]) -> int:
+    """Upload every PDF not already on the node. Returns how many were uploaded."""
     with build_session(config) as session:
         node_uuid = fetch_node_uuid(session, config)
-        for pdf_path in pdf_files:
-            uploaded = upload_pdf(session, config, node_uuid, pdf_path)
-            print(f"{uploaded.local_name} -> {uploaded.url}")
+        attached = fetch_attached_files(session, config, node_uuid)
+        return sum(upload_one(session, config, node_uuid, pdf_path, attached) for pdf_path in pdf_files)
 
 
-def main() -> int:
-    configure_logging()
-    logger = logging.getLogger("pdf_uploader")
-    args = parse_args()
-
-    try:
-        config = load_config()
-        pdf_files = find_pdf_files(config.local_dir)
-    except ConfigError as error:
-        logger.error("configuration error", extra={"event": "config_error", "detail": str(error)})
-        return EXIT_CONFIG_ERROR
-    except InvalidPdfError as error:
-        logger.error("invalid input file", extra={"event": "invalid_pdf", "detail": str(error)})
-        return EXIT_INVALID_INPUT
+def run(args: argparse.Namespace) -> int:
+    """Load configuration, validate local files, then upload. Raises on any failure."""
+    load_env_file(Path(ENV_FILE_NAME))
+    logging.getLogger().setLevel(parse_log_level(os.environ.get("LOG_LEVEL", DEFAULT_LOG_LEVEL)))
+    config = load_config()
+    pdf_files = find_pdf_files(config.local_dir)
 
     if not pdf_files:
         logger.warning("no pdf files found", extra={"event": "no_files", "local_dir": str(config.local_dir)})
@@ -104,14 +127,32 @@ def main() -> int:
     if args.dry_run:
         return EXIT_OK
 
-    try:
-        upload_all(config, pdf_files)
-    except DrupalApiError as error:
-        logger.error("upload failed", extra={"event": "upload_error", "detail": str(error)})
-        return EXIT_UPLOAD_ERROR
-
-    logger.info("all uploads complete", extra={"event": "done", "count": len(pdf_files)})
+    uploaded_count = upload_all(config, pdf_files)
+    logger.info("all uploads complete", extra={"event": "done", "count": len(pdf_files),
+                                                "uploaded": uploaded_count, "skipped": len(pdf_files) - uploaded_count})
     return EXIT_OK
+
+
+def report_failure(message: str, event: str, error: Exception, exit_code: int) -> int:
+    """Log a structured failure and return its exit code."""
+    logger.error(message, extra={"event": event, "detail": str(error)})
+    return exit_code
+
+
+def main() -> int:
+    configure_logging()
+    args = parse_args()
+
+    try:
+        return run(args)
+    except ConfigError as error:
+        return report_failure("configuration error", "config_error", error, EXIT_CONFIG_ERROR)
+    except InvalidPdfError as error:
+        return report_failure("invalid input file", "invalid_pdf", error, EXIT_INVALID_INPUT)
+    except LocalFileError as error:
+        return report_failure("local file error", "local_file_error", error, EXIT_LOCAL_FILE_ERROR)
+    except DrupalApiError as error:
+        return report_failure("upload failed", "upload_error", error, EXIT_UPLOAD_ERROR)
 
 
 if __name__ == "__main__":

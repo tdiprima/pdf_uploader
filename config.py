@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -10,6 +11,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LOCAL_DIR = "."
 DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_LOG_LEVEL = "INFO"
+LOG_LEVEL_NAMES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+# Drupal caps bundle and field machine names at 32 characters.
+MACHINE_NAME_PATTERN = re.compile(r"[a-z0-9_]{1,32}")
 
 
 class ConfigError(Exception):
@@ -54,9 +59,19 @@ def _parse_positive_int(env_name: str, raw_value: str) -> int:
 
 def _parse_machine_name(env_name: str, raw_value: str) -> str:
     """Drupal machine names: lowercase letters, digits, underscores."""
-    if not raw_value.replace("_", "").isalnum() or raw_value != raw_value.lower():
-        raise ConfigError(f"{env_name} must be a Drupal machine name (a-z, 0-9, _), got: {raw_value!r}")
+    if MACHINE_NAME_PATTERN.fullmatch(raw_value) is None:
+        raise ConfigError(
+            f"{env_name} must be a Drupal machine name (a-z, 0-9, _, at most 32 characters), got: {raw_value!r}"
+        )
     return raw_value
+
+
+def parse_log_level(raw_value: str) -> int:
+    """Map a LOG_LEVEL name to its logging constant. Rejects unknown names."""
+    level_name = raw_value.strip().upper()
+    if level_name not in LOG_LEVEL_NAMES:
+        raise ConfigError(f"LOG_LEVEL must be one of {', '.join(LOG_LEVEL_NAMES)}, got: {raw_value!r}")
+    return logging.getLevelNamesMapping()[level_name]
 
 
 def load_config() -> UploaderConfig:
