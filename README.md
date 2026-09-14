@@ -1,258 +1,67 @@
-# 🐲 PDF Drupal Uploader
+# PDF Uploader
 
-This little Python tool takes PDFs from your computer, uploads them to Drupal, and tells you where Drupal put them.
+A command-line tool that pushes a folder of local PDFs into a Drupal site through its core JSON:API, printing the public URL Drupal assigns to each one.
 
-Basically:
+## Getting PDFs onto a Drupal site shouldn't require SSH access
 
-**PDF on your Mac → Python does its thing → Drupal gets PDF → you get the new URL** ✨
+Drupal sites that store reference PDFs (library archives, policy documents, course materials) usually only expose a web UI for adding files one at a time. Bulk uploads mean either clicking through the admin form dozens of times, or asking someone with server access to `scp` files into `sites/default/files/` and register them in the database by hand. Neither scales past a handful of files, and the manual route is easy to get wrong: mistype a node ID, forget to check a file actually is a PDF, and you find out only when a link breaks on the live site.
 
-## 🧩 What's in here?
+## A thin, auditable layer over Drupal's own API
 
-* **`main.py`** — The boss. Runs the whole operation.
+This project automates the same thing a site editor would do by hand, using only the standard `JSON:API` and `HTTP Basic Authentication` core modules — no server access, no custom Drupal module, no database access. It validates every candidate file (extension, magic bytes, non-empty) before it ever leaves your machine, authenticates over HTTPS, resolves the target node's UUID, and streams each PDF into the node's file field one at a time. Every upload and failure is logged as structured JSON, and the whole thing fails fast and loudly on bad configuration or a bad file rather than silently skipping it.
 
-  * Supports `--dry-run` so you can test without actually uploading anything.
-  * Logs useful info/errors.
-  * Prints the old PDF → new Drupal URL.
+The code is split into small, single-purpose files: `pdf_files.py` does pure local validation with no network calls, `drupal_jsonapi.py` owns all the HTTP side effects, `config.py` loads and validates settings from the environment, and `main.py` wires them together and prints results.
 
-* **`config.py`** — Handles your environment variables and makes sure required settings exist before anything starts.
+## Example
 
-* **`pdf_files.py`** — Finds your local PDFs and makes sure they're valid.
-
-* **`drupal_jsonapi.py`** — Talks to Drupal.
-
-  * Logs in with Basic Auth.
-  * Finds the Drupal node's UUID from its node ID (`nid`).
-  * Uploads the PDF into the node's file field.
-
-* **`.env.example`** — Template for your Drupal settings and credentials.
-
-* **`requirements.txt`** — Python dependencies. `requests 2.32.5` is already installed.
-
-# 🚚 How the Upload Works
-
-The script uses Drupal's JSON:API.
-
-It essentially sends:
-
-```text
-POST /jsonapi/node/{type}/{uuid}/{field}
+```bash
+$ python main.py
+{"time": "2026-09-14 09:02:11", "level": "INFO", "component": "pdf_uploader", "message": "files selected", "event": "files_selected", "count": 2, "files": ["annual_report.pdf", "policy.pdf"]}
+annual_report.pdf -> https://example.com/sites/default/files/annual_report_0.pdf
+policy.pdf -> https://example.com/sites/default/files/policy.pdf
+{"time": "2026-09-14 09:02:12", "level": "INFO", "component": "pdf_uploader", "message": "all uploads complete", "event": "done", "count": 2}
 ```
 
-along with the raw PDF.
+Drupal renamed `annual_report.pdf` to `annual_report_0.pdf` because a file with that name already existed — the tool trusts the URL Drupal hands back, not the local filename, so nothing gets lost.
 
-The request tells Drupal:
+## Usage
 
-```text
-Hey Drupal 👋
-Here's a PDF named x.pdf.
-Please stick it in this file field.
+**One-time site setup** (via the Drupal admin UI, no server access needed):
+
+1. Enable the core **JSON:API** and **HTTP Basic Authentication** modules at `/admin/modules`.
+2. At `/admin/config/services/jsonapi`, choose "Accept all JSON:API create, read, update, and delete operations".
+3. Create (or pick) a content type with a File field that allows the `pdf` extension, and one node of that type to act as the upload target. Leave that field's "File directory" blank so files land in `/sites/default/files/` alongside your existing PDFs.
+
+**Install dependencies:**
+
+```bash
+uv sync
+# or
+pip install -r requirements.txt
 ```
 
-Because the PDF is attached directly to an existing Drupal node, Drupal automatically treats the file as **permanent**.
+**Configure** by copying `.env.example` to `.env` (or exporting the variables directly) and filling in:
 
-### What if the filename already exists?
+| Variable | Required | Description |
+|---|---|---|
+| `DRUPAL_BASE_URL` | yes | Site root, e.g. `https://example.com` (must be HTTPS) |
+| `DRUPAL_USER` | yes | Drupal account that can edit the target node |
+| `DRUPAL_PASSWORD` | yes | Password for that account |
+| `DRUPAL_NODE_TYPE` | yes | Content type machine name, e.g. `pdf_library` |
+| `DRUPAL_NODE_ID` | yes | nid of the node that holds the uploaded files |
+| `DRUPAL_FILE_FIELD` | yes | File field machine name, e.g. `field_pdf` |
+| `LOCAL_PDF_DIR` | no | Folder to scan (default: current directory) |
+| `DRUPAL_TIMEOUT_SECONDS` | no | Per-request timeout (default: 120) |
+| `LOG_LEVEL` | no | Log verbosity (default: `INFO`) |
 
-No drama. 😎
+**Run it:**
 
-If this already exists:
-
-```text
-x.pdf
+```bash
+python main.py             # upload every valid PDF in LOCAL_PDF_DIR
+python main.py --dry-run   # list the files that would be uploaded; no network calls
 ```
 
-Drupal can rename the new one:
-
-```text
-x_0.pdf
-```
-
-The script grabs whatever final filename Drupal chose and prints the new URL.
-
-So you'll see something like:
-
-```text
-local.pdf → https://example.com/sites/default/files/local_0.pdf
-```
-
-Then you can update the old PDF links in the editor.
-
-# 🛠️ One-Time Drupal Setup
-
-Good news: **you don't need server access for this part.**
-
-Everything can be done through the Drupal admin UI.
-
-### 1️⃣ Enable the required modules
-
-Go to:
-
-```text
-/admin/modules
-```
-
-Enable:
-
-* **JSON:API**
-* **HTTP Basic Authentication**
-
-### 2️⃣ Allow JSON:API operations
-
-Go to:
-
-```text
-/admin/config/services/jsonapi
-```
-
-Choose:
-
-**Accept all JSON:API create, read, update, and delete operations**
-
-### 3️⃣ Create a content type for the PDFs
-
-For example:
-
-```text
-pdf_library
-```
-
-Add a **File** field:
-
-```text
-field_pdf
-```
-
-Recommended settings:
-
-```text
-Allowed extensions: pdf
-Number of values: Unlimited
-File directory: [leave blank]
-Maximum file size: larger than your biggest PDF
-```
-
-Leaving **File directory** blank means the PDFs land in:
-
-```text
-/sites/default/files/
-```
-
-alongside the existing PDFs.
-
-### 4️⃣ Create one node
-
-Create a node using your new content type.
-
-Then edit it and look at the URL.
-
-For example:
-
-```text
-/node/123/edit
-```
-
-That means your **nid** is:
-
-```text
-123
-```
-
-📌 Keep that number. The uploader needs it.
-
-### 5️⃣ Check permissions
-
-The Drupal account you're using must have permission to **edit that node/content type**.
-
-Otherwise Drupal will basically say:
-
-🚫 Nice try.
-
-# 🚀 Running the Uploader
-
-Open Terminal:
-
-```sh
-cd pdf_uploader
-```
-
-Create your real `.env` file:
-
-```sh
-cp .env.example .env
-```
-
-Now edit `.env` and fill in the required values.
-
-⚠️ **Never commit `.env` to Git.**  
-That's where credentials live.
-
-Load the settings:
-
-```sh
-set -a
-source .env
-set +a
-```
-
-## 🧪 First: Dry Run
-
-Before touching Drupal:
-
-```sh
-python3 main.py --dry-run
-```
-
-This lets you make sure everything looks sane without actually uploading PDFs.
-
-**Current status:** ✅ Dry run passes.
-
-## 🔥 Then: The Real Deal
-
-Once JSON:API is enabled on the Drupal site:
-
-```sh
-python3 main.py
-```
-
-And off the PDFs go. 🚀
-
-# 🧠 What We Still Need
-
-The real upload hasn't been tested yet because the site still needs JSON:API enabled.
-
-Once the Drupal setup is finished, we need three things:
-
-```text
-Node ID (nid)
-Content type
-File field name
-```
-
-Example:
-
-```text
-nid:          123
-content type: pdf_library
-field:        field_pdf
-```
-
-Then we can test with **one PDF first** before unleashing the whole army. 🫡
-
-# 🕵️ Side Quest: Other Upload Methods
-
-A few other possible routes were checked:
-
-* IMCE
-* Media
-* CKEditor 5 upload routes
-
-They all returned:
-
-```text
-404 💀
-```
-
-So whatever editor plugin currently handles PDF uploads doesn't appear to expose a usable public API.
-
-**JSON:API is the cleanest HTTP route we've found.**
+Only files directly inside `LOCAL_PDF_DIR` (no subfolders) that end in `.pdf`, don't start with a dot, and start with the `%PDF-` magic bytes are considered. Anything that looks like a PDF by name but fails the header check stops the run with a clear error instead of uploading a broken file.
 
 <br>
+
